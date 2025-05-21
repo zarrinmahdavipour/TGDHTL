@@ -42,4 +42,4 @@ Citation
 Z. Mahdavipour, L. Xiao, J. Yang, G. Farooque, and A. Khader, "TransHTL: Hyperspectral Image Classification via Transformer-GCN-Diffusion Heterogeneous Transfer Learning," IEEE Transactions on Geoscience and Remote Sensing, 2025.
 
 Contact
-   For questions, contact Zarrin Mahdavipour at [your.email@example.com].
+   For questions, contact Zarrin Mahdavipour at [zmahdavipour@yahoo.com].
