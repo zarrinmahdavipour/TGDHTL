@@ -1,1 +1,8 @@
+The code is divided into the following files:
 
+- **config.py**: Dataset configurations and constant parameters.
+- **models.py**: Definitions of the MSSA, GCN, DiffusionModel, and TransHTLPlus models.
+- **utils.py**: Helper functions for preprocessing, metric computation, and RGB data generation.
+- **visualizations.py**: Functions for generating visualizations (e.g., classification maps, attention maps, t-SNE).
+- **train.py**: Training loop and evaluation logic.
+- **main.py**: Main script for executing the code.
