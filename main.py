@@ -4,8 +4,10 @@ This script processes multiple hyperspectral datasets, trains the TransHTLPlus m
 and generates evaluation results and visualizations.
 """
 
-import os
+import torch
 import numpy as np
+torch.manual_seed(42)
+np.random.seed(42)
 from scipy.io import loadmat
 from .config import DATASETS, PATCH_LENGTH, N_COMPONENTS
 from .models import TransHTLPlus, DiffusionModel
