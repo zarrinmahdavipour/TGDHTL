@@ -1,59 +1,51 @@
-"""Configuration file for TransHTL framework.
+import os
 
-This module defines dataset configurations and constant parameters used across the
-hyperspectral image classification pipeline.
-"""
+class Config:
+    """
+    Configuration settings for the TGDHTL framework.
+    Contains hyperparameters and paths for HSI classification experiments.
+    """
+    # Dataset settings
+    DATASET_NAME = 'IndianPines'
+    DATA_PATH = './IndianPines.mat'
+    LABEL_PATH = './IndianPines_gt.mat'
+    NUM_CLASSES = 16  # Indian Pines has 16 classes
+    PATCH_SIZE = 32
+    STRIDE = 12
+    PCA_COMPONENTS = 30
 
-# Dataset configurations for Indian Pines, PaviaU, KSC, and Salinas
-DATASETS = {
-    'IndianPines': {
-        'num_classes': 16,  # Number of classes
-        'bands': 200,       # Number of spectral bands
-        'size': (145, 145), # Spatial dimensions (height, width)
-        'class_names': [
-            'Alfalfa', 'Corn-notill', 'Corn-mintill', 'Corn', 'Grass-pasture',
-            'Grass-trees', 'Grass-pasture-mowed', 'Hay-windrowed', 'Oats',
-            'Soybean-notill', 'Soybean-mintill', 'Soybean-clean', 'Wheat',
-            'Woods', 'Buildings-Grass-Trees-Drives', 'Stone-Steel-Towers'
-        ],
-        'false_color_bands': [50, 27, 17]  # Bands for RGB false color visualization
-    },
-    'PaviaU': {
-        'num_classes': 9,
-        'bands': 103,
-        'size': (610, 340),
-        'class_names': [
-            'Asphalt', 'Meadows', 'Gravel', 'Trees', 'Painted metal sheets',
-            'Bare Soil', 'Bitumen', 'Self-Blocking Bricks', 'Shadows'
-        ],
-        'false_color_bands': [50, 30, 10]
-    },
-    'KSC': {
-        'num_classes': 13,
-        'bands': 176,
-        'size': (512, 614),
-        'class_names': [
-            'Scrub', 'Willow swamp', 'CP hammock', 'CP/Oak', 'Slash pine',
-            'Oak/Broadleaf', 'Hardwood swamp', 'Graminoid marsh', 'Spartina marsh',
-            'Cattail marsh', 'Salt marsh', 'Mud flats', 'Water'
-        ],
-        'false_color_bands': [50, 27, 17]
-    },
-    'Salinas': {
-        'num_classes': 16,
-        'bands': 204,
-        'size': (512, 217),
-        'class_names': [
-            'Brocoli_green_weeds_1', 'Brocoli_green_weeds_2', 'Fallow',
-            'Fallow_rough_plow', 'Fallow_smooth', 'Stubble', 'Celery',
-            'Grapes_untrained', 'Soil_vinyard_develop', 'Corn_senesced_green_weeds',
-            'Lettuce_romaine_4wk', 'Lettuce_romaine_5wk', 'Lettuce_romaine_6wk',
-            'Lettuce_romaine_7wk', 'Vinyard_untrained', 'Vinyard_vertical_trellis'
-        ],
-        'false_color_bands': [50, 27, 17]
-    }
-}
+    # Diffusion augmentation settings
+    DDIM_TIMESTEPS = 15
+    DDIM_BETA_START = 0.0001
+    DDIM_BETA_END = 0.02
+    NUM_SYNTHETIC_SAMPLES = 5000
+    MINORITY_RATIO = 0.3
 
-# Constant parameters
-PATCH_LENGTH = 16  # Half-size of the patch for spatial context
-N_COMPONENTS = 30  # Number of PCA components for dimensionality reduction
+    # Model architecture settings
+    CNN_FILTERS = 64
+    TRANSFORMER_DIM = 64
+    TRANSFORMER_HEADS = 6
+    TRANSFORMER_LAYERS = 4
+    PRUNE_RATIO = 0.3
+    MSSA_SCALES = [4, 8, 16]
+    GCN_THRESHOLD = 0.85
+    GCN_LAMBDA = 0.5
+    DROPOUT = 0.3
+    MLP_HIDDEN = 64
+
+    # Training settings
+    BATCH_SIZE = 32
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 50
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Output settings
+    MODEL_SAVE_PATH = './tgdhtl_model.pth'
+    OUTPUT_DIR = './outputs'
+    VISUALIZATION_DIR = os.path.join(OUTPUT_DIR, 'visualizations')
+
+    @staticmethod
+    def create_dirs():
+        """Create output directories if they don't exist."""
+        os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+        os.makedirs(Config.VISUALIZATION_DIR, exist_ok=True)
