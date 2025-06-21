@@ -1,125 +1,62 @@
-"""Utility functions for the TransHTL framework.
-
-This module provides helper functions for data preprocessing, metric computation,
-and data generation.
-"""
-
 import numpy as np
 import torch
-from sklearn.preprocessing import scale
-from sklearn.decomposition import PCA
+from sklearn.metrics import accuracy_score, f1_score
+from scipy.io import loadmat
+from data_preprocessing import preprocess_hsi
+from torch.utils.data import DataLoader, TensorDataset
+from config import Config
 
-def list_to_colormap(x_list):
-    """Convert class labels to RGB colors for visualization.
-
-    Args:
-        x_list (np.ndarray): Array of class labels.
-
-    Returns:
-        np.ndarray: Array of RGB colors of shape (num_samples, 3).
+def load_data(data_path, label_path):
     """
-    y = np.zeros((x_list.shape[0], 3))
-    color_map = {
-        0: [0, 0, 0], 1: [1, 0, 0], 2: [0, 1, 0], 3: [0, 0, 1], 4: [0.5, 0.5, 0],
-        5: [0, 1, 1], 6: [1, 0, 1], 7: [0.5, 0, 0], 8: [0, 0.5, 0], 9: [0.5, 0, 0.5],
-        10: [1, 0.5, 0], 11: [0, 0.5, 0.5], 12: [0.5, 0.5, 0], 13: [0.5, 0, 0.5],
-        14: [0, 0.5, 1], 15: [0.75, 0.75, 0.75], 16: [0.25, 0.25, 0.25]
-    }
-    for idx, val in enumerate(x_list):
-        y[idx] = color_map[int(val)]  # Map each label to its RGB color
-    return y
-
-def compute_sam(real_data, synthetic_data):
-    """Compute Spectral Angle Mapper (SAM) between real and synthetic data.
-
-    Args:
-        real_data (np.ndarray): Real hyperspectral data of shape (..., bands).
-        synthetic_data (np.ndarray): Synthetic data of shape (..., bands).
-
-    Returns:
-        float: Average SAM score in radians.
+    Load HSI cube and ground truth labels.
+    Input: Paths to .mat files
+    Output: HSI cube (H x W x B), labels (H x W)
     """
-    real_data = real_data.reshape(-1, real_data.shape[-1])
-    synthetic_data = synthetic_data.reshape(-1, synthetic_data.shape[-1])
-    sam_scores = []
-    for r, s in zip(real_data, synthetic_data):
-        r_norm = np.linalg.norm(r)
-        s_norm = np.linalg.norm(s)
-        if r_norm > 0 and s_norm > 0:
-            cos_theta = np.dot(r, s) / (r_norm * s_norm)  # Compute cosine similarity
-            cos_theta = np.clip(cos_theta, -1, 1)
-            sam = np.arccos(cos_theta)  # Convert to angle
-            sam_scores.append(sam)
-    return np.mean(sam_scores) if sam_scores else 0.0
+    data = loadmat(data_path)
+    labels = loadmat(label_path)
+    # Adjust keys based on dataset (e.g., Indian Pines)
+    hsi_cube = data.get('indian_pines_corrected', data.get('paviaU'))
+    gt = labels.get('indian_pines_gt', labels.get('paviaU_gt'))
+    return hsi_cube, gt
 
-def compute_mmd(x, y, sigma=1.0):
-    """Compute Maximum Mean Discrepancy (MMD) between two feature sets.
-
-    Args:
-        x (torch.Tensor): First feature set of shape (num_samples, features).
-        y (torch.Tensor): Second feature set of shape (num_samples, features).
-        sigma (float): Gaussian kernel bandwidth (default: 1.0).
-
-    Returns:
-        float: MMD score.
+def evaluate_model(model, hsi_cube, labels, cfg):
     """
-    def gaussian_kernel(x, y, sigma):
-        x_size = x.shape[0]
-        y_size = y.shape[0]
-        dim = x.shape[1]
-        x = x.unsqueeze(1)
-        y = y.unsqueeze(0)
-        return torch.exp(-torch.sum((x - y) ** 2, dim=2) / (2 * sigma ** 2))
-
-    x = x.view(x.size(0), -1)
-    y = y.view(y.size(0), -1)
-    xx = gaussian_kernel(x, x, sigma).mean()  # Kernel mean for x
-    yy = gaussian_kernel(y, y, sigma).mean()  # Kernel mean for y
-    xy = gaussian_kernel(x, y, sigma).mean()  # Cross-kernel mean
-    return xx + yy - 2 * xy
-
-def preprocess_data(data, gt, patch_length=16, n_components=30):
-    """Preprocess hyperspectral data by applying PCA and extracting patches.
-
-    Args:
-        data (np.ndarray): Input hyperspectral data of shape (height, width, bands).
-        gt (np.ndarray): Ground truth labels of shape (height, width).
-        patch_length (int): Half-size of the patch (default: 16).
-        n_components (int): Number of PCA components (default: 30).
-
-    Returns:
-        tuple: Patches (torch.Tensor), labels (torch.Tensor), coordinates (list), processed data (np.ndarray).
+    Evaluate model performance on HSI data.
+    Input: Model, HSI cube, labels, configuration
+    Output: Overall accuracy, F1-score
     """
-    h, w, bands = data.shape
-    # Normalize data
-    data = scale(data.reshape(-1, bands)).reshape(h, w, bands)
-    # Apply PCA for dimensionality reduction
-    pca = PCA(n_components=n_components)
-    data = pca.fit_transform(data.reshape(-1, bands)).reshape(h, w, n_components)
-    patches = []
-    labels = []
-    coords = []
-    # Extract patches centered at labeled pixels
-    for i in range(patch_length, h - patch_length):
-        for j in range(patch_length, w - patch_length):
-            if gt[i, j] > 0:
-                patch = data[i-patch_length:i+patch_length, j-patch_length:j+patch_length, :]
-                patches.append(patch)
-                labels.append(gt[i, j] - 1)  # Adjust labels to 0-based indexing
-                coords.append((i, j))
-    patches = torch.tensor(np.array(patches), dtype=torch.float32).unsqueeze(1)  # Add channel dimension
-    labels = torch.tensor(labels, dtype=torch.long)
-    return patches, labels, coords, data
+    device = torch.device(cfg.DEVICE)
+    patches = preprocess_hsi(hsi_cube, cfg.PCA_COMPONENTS, cfg.PATCH_SIZE, cfg.STRIDE)
+    patch_labels = []
+    H, W = labels.shape
+    for i in range(0, H - cfg.PATCH_SIZE + 1, cfg.STRIDE):
+        for j in range(0, W - cfg.PATCH_SIZE + 1, cfg.STRIDE):
+            center_i, center_j = i + cfg.PATCH_SIZE // 2, j + cfg.PATCH_SIZE // 2
+            if center_i < H and center_j < W:
+                patch_labels.append(labels[center_i, center_j])
+    patch_labels = np.array(patch_labels)
 
-def generate_rgb_data(hsi_data):
-    """Generate RGB-like data from hyperspectral data for cross-domain adaptation.
+    # Filter valid patches
+    valid_idx = patch_labels > 0
+    patches = patches[valid_idx]
+    patch_labels = patch_labels[valid_idx] - 1  # 0-based labels
 
-    Args:
-        hsi_data (torch.Tensor): Hyperspectral data of shape (batch, 1, height, width, bands).
+    # Create dataset
+    dataset = TensorDataset(torch.tensor(patches).float(), torch.tensor(patch_labels).long())
+    loader = DataLoader(dataset, batch_size=cfg.BATCH_SIZE, shuffle=False)
 
-    Returns:
-        torch.Tensor: RGB-like data of shape (batch, 1, height, width, 3).
-    """
-    hsi_data = hsi_data.squeeze(1)  # Remove channel dimension
-    rgb_data = hsi_data[:, :, :, :3]  # Take first three bands
-    return rgb_data.unsqueeze(1)  # Add channel dimension back
+    # Evaluate
+    model.eval()
+    preds = []
+    truths = []
+    with torch.no_grad():
+        for batch_patches, batch_labels in loader:
+            batch_patches = batch_patches.to(device)
+            outputs, _ = model(batch_patches)
+            _, predicted = torch.max(outputs, 1)
+            preds.extend(predicted.cpu().numpy())
+            truths.extend(batch_labels.numpy())
+    
+    accuracy = accuracy_score(truths, preds)
+    f1 = f1_score(truths, preds, average='weighted')
+    return accuracy, f1
