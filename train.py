@@ -1,209 +1,104 @@
-"""
-Training and evaluation functions for the TransHTL framework.
-
-This module contains the training loop and evaluation logic with 5-fold cross-validation,
-data augmentation, and visualization generation.
-"""
-
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from sklearn.model_selection import KFold
-from sklearn import metrics
+from torch.utils.data import DataLoader, TensorDataset
+from data_preprocessing import preprocess_hsi
+from feature_extraction import FeatureExtractor
+from cross_domain_adapter import CrossDomainAdapter
+from diffusion_augmentation import DDIM
+from mssa_gcn import MSSA, GCN
 import numpy as np
-from src.models import TransHTLPlus, DiffusionModel
-from src.utils import augment_data, generate_rgb_data, compute_mmd
-from src.visualizations import (
-    generate_groundtruth_image, generate_falsecolor_image,
-    generate_classification_map, generate_attention_maps, generate_tsne_visualization
-)
 
-def train(net, train_data, train_labels, test_data, test_labels, diffusion_model, classes, dataset_name, data_raw, gt, epochs=300, batch_size=64, lr=1e-4):
+class TGDHTL(nn.Module):
     """
-    Train and evaluate the TransHTL+ model on a single train-test split.
-
-    Args:
-        net (nn.Module): TransHTL+ model.
-        train_data (torch.Tensor): Training data of shape (num_train, 1, height, width, bands).
-        train_labels (torch.Tensor): Training labels of shape (num_train,).
-        test_data (torch.Tensor): Test data of shape (num_test, 1, height, width, bands).
-        test_labels (torch.Tensor): Test labels of shape (num_test,).
-        diffusion_model (nn.Module): Diffusion model for data augmentation.
-        classes (int): Number of classes.
-        dataset_name (str): Name of the dataset.
-        data_raw (np.ndarray): Raw hyperspectral data of shape (height, width, bands).
-        gt (np.ndarray): Ground truth labels of shape (height, width).
-        epochs (int): Number of training epochs.
-        batch_size (int): Batch size for training.
-        lr (float): Learning rate.
-
-    Returns:
-        tuple: Overall accuracy (OA), SAM score, MMD score, AA, Kappa.
+    TGDHTL framework for HSI classification.
+    Input: Patches (N x 32 x 32 x 30)
+    Output: Class probabilities (N x C)
     """
-    net = net.cuda()
-    # Initialize optimizer and scheduler
-    optimizer = optim.AdamW(net.parameters(), lr=lr, weight_decay=0.01)
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
-    # Compute class weights to handle imbalance
-    class_counts = torch.bincount(train_labels)
-    class_weights = 1.0 / (class_counts + 1e-6)
-    minority_classes = torch.where(class_counts < class_counts.mean())[0]
-    class_weights[minority_classes] *= 1.5  # Boost weights for minority classes
-    loss_fn = nn.CrossEntropyLoss(weight=class_weights.cuda())
-    best_oa = 0
-    patience = 10
-    patience_counter = 0
-
-    # Augment training data with synthetic samples
-    synthetic_data, synthetic_labels, sam_score = augment_data(
-        diffusion_model, train_data, train_labels, num_samples=10000
-    )
-    train_data = torch.cat([train_data, synthetic_data], dim=0)
-    train_labels = torch.cat([train_labels, synthetic_labels], dim=0)
-
-    # Compute MMD between HSI and RGB features
-    rgb_data = generate_rgb_data(train_data)
-    with torch.no_grad():
-        _, hsi_features = net(train_data.cuda(), return_features=True)
-        _, rgb_features = net(rgb_data.cuda(), return_features=True)
-        mmd_score = compute_mmd(hsi_features, rgb_features).item()
-
-    # Training loop
-    for epoch in range(epochs):
-        net.train()
-        indices = torch.randperm(train_data.size(0))  # Shuffle data
-        for i in range(0, train_data.size(0), batch_size):
-            batch_indices = indices[i:i+batch_size]
-            batch_data = train_data[batch_indices].cuda()
-            batch_labels = train_labels[batch_indices].cuda()
-            optimizer.zero_grad()
-            outputs = net(batch_data)
-            loss = loss_fn(outputs, batch_labels)
-            loss.backward()
-            optimizer.step()
-        scheduler.step()
-
-        # Evaluate on test set
-        net.eval()
-        with torch.no_grad():
-            outputs = net(test_data.cuda())
-            _, pred = torch.max(outputs, 1)
-            pred = pred.cpu().numpy()
-            gt_test = test_labels.numpy()
-            oa = metrics.accuracy_score(gt_test, pred)
-            each_acc = metrics.recall_score(gt_test, pred, average=None)
-            valid_classes = np.unique(gt_test)
-            aa = np.mean(each_acc[valid_classes])
-            kappa = metrics.cohen_kappa_score(gt_test, pred)
-
-        print(f'Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}, OA: {oa:.4f}, AA: {aa:.4f}, Kappa: {kappa:.4f}')
-
-        # Save best model
-        if oa > best_oa:
-            best_oa = oa
-            patience_counter = 0
-            torch.save(net.state_dict(), f'results/{dataset_name}/best_model.pth')
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered")
-                break
-
-    return best_oa, sam_score, mmd_score, aa, kappa
-
-def train_with_cross_validation(net, data, labels, diffusion_model, classes, dataset_name, data_raw, gt, labeled_ratio=0.2, epochs=300, batch_size=64, lr=1e-4):
-    """
-    Train and evaluate the TransHTL+ model using 5-fold cross-validation.
-
-    Args:
-        net (nn.Module): TransHTL+ model.
-        data (torch.Tensor): Full dataset of shape (num_samples, 1, height, width, bands).
-        labels (torch.Tensor): Labels of shape (num_samples,).
-        diffusion_model (nn.Module): Diffusion model for data augmentation.
-        classes (int): Number of classes.
-        dataset_name (str): Name of the dataset.
-        data_raw (np.ndarray): Raw hyperspectral data of shape (height, width, bands).
-        gt (np.ndarray): Ground truth labels of shape (height, width).
-        labeled_ratio (float): Fraction of labeled samples for training.
-        epochs (int): Number of training epochs.
-        batch_size (int): Batch size for training.
-        lr (float): Learning rate.
-
-    Returns:
-        tuple: Mean OA, standard deviation of OA, mean SAM, mean MMD.
-    """
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    oas = []
-    sams = []
-    mmds = []
-    aas = []
-    kappas = []
-
-    for fold, (train_idx, test_idx) in enumerate(kf.split(data)):
-        print(f"Processing fold {fold+1}/5 for {dataset_name}...")
-        # Split data
-        train_data_full, test_data = data[train_idx], data[test_idx]
-        train_labels_full, test_labels = labels[train_idx], labels[test_idx]
-
-        # Select labeled_ratio of training data
-        train_size = int(labeled_ratio * len(train_data_full))
-        train_indices = torch.randperm(len(train_data_full))[:train_size]
-        train_data = train_data_full[train_indices]
-        train_labels = train_labels_full[train_indices]
-
-        # Reset model weights
-        net = TransHTLPlus(classes=classes, input_dim=data.size(-1)).cuda()
-
-        # Train and evaluate
-        oa, sam, mmd, aa, kappa = train(
-            net=net,
-            train_data=train_data,
-            train_labels=train_labels,
-            test_data=test_data,
-            test_labels=test_labels,
-            diffusion_model=diffusion_model,
-            classes=classes,
-            dataset_name=dataset_name,
-            data_raw=data_raw,
-            gt=gt,
-            epochs=epochs,
-            batch_size=batch_size,
-            lr=lr
+    def __init__(self, num_classes=16):
+        super(TGDHTL, self).__init__()
+        self.feature_extractor = FeatureExtractor()
+        self.cross_domain_adapter = CrossDomainAdapter()
+        self.mssa = MSSA()
+        self.gcn = GCN()
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_classes)
         )
 
-        oas.append(oa)
-        sams.append(sam)
-        mmds.append(mmd)
-        aas.append(aa)
-        kappas.append(kappa)
+    def forward(self, x):
+        x = self.feature_extractor(x)
+        x, mmd_loss = self.cross_domain_adapter(x, None)  # RGB features omitted for simplicity
+        x = self.mssa(x)
+        x = self.gcn(x)
+        # Global average pooling
+        x = x.mean(dim=(1, 2))  # (N, 64)
+        x = self.classifier(x)
+        return x, mmd_loss
 
-    # Compute mean and standard deviation
-    mean_oa = np.mean(oas)
-    std_oa = np.std(oas)
-    mean_sam = np.mean(sams)
-    mean_mmd = np.mean(mmds)
-    mean_aa = np.mean(aas)
-    mean_kappa = np.mean(kappas)
+def train_tgdhtl(hsi_cube, labels, num_epochs=50, batch_size=32, lr=0.001):
+    """
+    Train TGDHTL model.
+    Input: HSI cube (H x W x B), labels (H x W)
+    Output: Trained model
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # Preprocess data
+    patches = preprocess_hsi(hsi_cube)
+    patch_labels = []  # Assign labels to patches (center pixel)
+    H, W = labels.shape
+    patch_size, stride = 32, 12
+    for i in range(0, H - patch_size + 1, stride):
+        for j in range(0, W - patch_size + 1, stride):
+            center_i, center_j = i + patch_size // 2, j + patch_size // 2
+            if center_i < H and center_j < W:
+                patch_labels.append(labels[center_i, center_j])
+    patch_labels = np.array(patch_labels)
 
-    # Load best model from the last fold and generate visualizations
-    net.load_state_dict(torch.load(f'results/{dataset_name}/best_model.pth'))
-    generate_groundtruth_image(data_raw, gt, dataset_name)
-    generate_falsecolor_image(data_raw, dataset_name)
-    generate_classification_map(net, data_raw, gt, dataset_name)
-    generate_attention_maps(net, data_raw, dataset_name)
-    if dataset_name == 'IndianPines':
-        generate_tsne_visualization(net, test_data, test_labels, dataset_name, mean_oa)
+    # Filter valid patches
+    valid_idx = patch_labels > 0  # Ignore background (label 0)
+    patches = patches[valid_idx]
+    patch_labels = patch_labels[valid_idx] - 1  # Adjust labels to 0-based
 
-    # Save metrics
-    output_dir = f'results/{dataset_name}'
-    os.makedirs(output_dir, exist_ok=True)
-    with open(f'{output_dir}/metrics.txt', 'w') as f:
-        f.write(f'Mean OA: {mean_oa:.4f} ± {std_oa:.4f}\n')
-        f.write(f'Mean AA: {mean_aa:.4f}\n')
-        f.write(f'Mean Kappa: {mean_kappa:.4f}\n')
-        f.write(f'Mean SAM: {mean_sam:.4f} radians\n')
-        f.write(f'Mean MMD: {mean_mmd:.4f}\n')
+    # Diffusion augmentation
+    ddim = DDIM().to(device)
+    synthetic_patches = ddim.generate_samples(torch.tensor(patches).float().to(device))
+    synthetic_labels = np.random.randint(0, len(np.unique(patch_labels)), size=len(synthetic_patches))
+    patches = np.concatenate([patches, synthetic_patches], axis=0)
+    patch_labels = np.concatenate([patch_labels, synthetic_labels], axis=0)
 
-    return mean_oa, std_oa, mean_sam, mean_mmd
+    # Create dataset
+    dataset = TensorDataset(torch.tensor(patches).float(), torch.tensor(patch_labels).long())
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Initialize model
+    model = TGDHTL(num_classes=len(np.unique(patch_labels))).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        for batch_patches, batch_labels in loader:
+            batch_patches, batch_labels = batch_patches.to(device), batch_labels.to(device)
+            optimizer.zero_grad()
+            outputs, mmd_loss = model(batch_patches)
+            loss = criterion(outputs, batch_labels) + (mmd_loss if mmd_loss is not None else 0)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f'Epoch {epoch+1}/{num_epochs}, Loss: {total_loss/len(loader):.4f}')
+
+    return model
+
+if __name__ == "__main__":
+    # Example usage (load your HSI data here)
+    import scipy.io as sio
+    data = sio.loadmat('IndianPines.mat')['indian_pines_corrected']
+    labels = sio.loadmat('IndianPines_gt.mat')['indian_pines_gt']
+    model = train_tgdhtl(data, labels)
+    torch.save(model.state_dict(), 'tgdhtl_model.pth')
